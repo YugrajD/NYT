@@ -6,6 +6,7 @@ export default defineConfig(({ mode }) => ({
   plugins: [svelte()],
   server: mode === 'development' ? {
     proxy: {
+      
       '/api': {
         target: 'http://backend:8000',
         changeOrigin: true,
@@ -15,6 +16,22 @@ export default defineConfig(({ mode }) => ({
             console.log('Proxying request:', req.url)
           })
         }
+      },
+      // OIDC login flow
+      '/login': {
+        target: 'http://backend:8000',
+        changeOrigin: true,
+        secure: false,
+      },
+      '/authorize': {
+        target: 'http://backend:8000',
+        changeOrigin: true,
+        secure: false,
+      },
+      '/logout': {
+        target: 'http://backend:8000',
+        changeOrigin: true,
+        secure: false,
       },
     },
   } : undefined,
