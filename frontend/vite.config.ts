@@ -6,7 +6,6 @@ export default defineConfig(({ mode }) => ({
   plugins: [svelte()],
   server: mode === 'development' ? {
     proxy: {
-      
       '/api': {
         target: 'http://backend:8000',
         changeOrigin: true,
