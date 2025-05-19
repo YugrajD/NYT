@@ -4,6 +4,8 @@ from flask_cors import CORS
 from authlib.integrations.flask_client import OAuth
 from authlib.common.security import generate_token
 from dotenv import load_dotenv
+from pymongo import MongoClient
+from bson import ObjectId
 import os
 import requests
 
@@ -35,12 +37,18 @@ oauth.register(
     client_kwargs={'scope': 'openid email profile'}
 )
 
+# MongoDB setup
+mongo_uri = os.getenv("MONGO_URI")
+mongo_client = MongoClient(mongo_uri)
+db = mongo_client.get_database()
+comments_collection = db.comments
+
 # --- Auth Routes ---
 @app.route('/login')
 def login():
     session['nonce'] = nonce
     return oauth.flask_app.authorize_redirect('http://localhost:8000/authorize', nonce=nonce)
-
+ # --- Redirect to Dex for authorization ---
 @app.route('/authorize')
 def authorize():
     token = oauth.flask_app.authorize_access_token()
@@ -65,30 +73,81 @@ def get_articles():
     api_key = os.getenv('NYT_API_KEY')
     keyword = 'Davis OR Sacramento'
     page_num = request.args.get('page', default=0, type=int)
-
     try:
         resp = requests.get(
-            f'https://api.nytimes.com/svc/search/v2/articlesearch.json?q={keyword}&page={page_num}&api-key={api_key}'
+            f'https://api.nytimes.com/svc/search/v2/articlesearch.json'
+            f'?q={keyword}&page={page_num}&api-key={api_key}'
         )
         return jsonify(resp.json())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 # --- Comment System ---
-comments_store = {}
-
 @app.route('/api/comments')
 def get_comments():
     url = request.args.get('url')
-    return jsonify(comments_store.get(url, []))
+    if not url:
+        return jsonify([])
+    # find all comments for the given URL and return them as JSON
+    docs = comments_collection.find({'url': url})
+    out = []
+    for d in docs:
+        out.append({
+            '_id': str(d['_id']),
+            'url': d['url'],
+            'user': d.get('user', 'anonymous'),
+            'text': d.get('text', ''),
+            'removed': d.get('removed', False),
+            'parentId': d.get('parentId')
+        })
+    return jsonify(out)
 
+# route for posting comments
 @app.route('/api/comments', methods=['POST'])
 def post_comment():
     data = request.get_json()
-    url = data['url']
-    comment = {"user": data['user'], "text": data['text']}
-    comments_store.setdefault(url, []).append(comment)
-    return jsonify({"status": "ok"})
+    # check for required fields
+    if not data.get('url') or not data.get('text'):
+        return jsonify({'error': 'Missing fields'}), 400
+    comment = {
+        'url': data['url'],
+        'user': data.get('user', 'anonymous'),
+        'text': data['text']
+    }
+    # attach parentId if this is a reply
+    if data.get('parentId'):
+        comment['parentId'] = data['parentId']
+    # ensure removed flag is always present
+    comment['removed'] = False
+    comments_collection.insert_one(comment)
+    return jsonify({'status': 'ok'})
+
+# route for counting comments
+@app.route('/api/comment-counts')
+def comment_counts():
+    counts = {}
+    # count comments for each URL``
+    for doc in comments_collection.find():
+        url = doc['url']
+        counts[url] = counts.get(url, 0) + 1
+    return jsonify(counts)
+
+# --- Moderator‐only soft delete ---
+@app.route('/api/comments/<comment_id>', methods=['DELETE'])
+def delete_comment(comment_id):
+    user = session.get('user', {})
+    # only the moderator@example.com account may delete, maybe admin too later but the rubric doesn't say TA
+    if user.get('email') != 'moderator@hw3.com':
+        return jsonify({'error': 'Forbidden'}), 403
+    # instead of removing, mark removed=true
+    result = comments_collection.update_one(
+        {'_id': ObjectId(comment_id)},
+        {'$set': {'removed': True}}
+    )
+    # if we found a comment, return its id
+    if result.matched_count:
+        return jsonify({'status': 'soft-deleted', 'id': comment_id})
+    return jsonify({'error': 'Not found'}), 404
 
 # --- Frontend Serving ---
 @app.route('/<path:path>')
@@ -100,4 +159,8 @@ def serve_frontend(path=''):
 
 # --- Run App ---
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8000)), debug=os.getenv('FLASK_ENV') != 'production')
+    app.run(
+      host='0.0.0.0',
+      port=int(os.getenv('PORT', 8000)),
+      debug=os.getenv('FLASK_ENV') != 'production'
+    )
